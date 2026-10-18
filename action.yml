@@ -1,0 +1,68 @@
+name: "Glimind MCP server check"
+description: "Audit an MCP server for agent-readiness, client compatibility and tool poisoning. Fails the build below a grade you choose."
+author: "Glimind"
+branding:
+  icon: "check-circle"
+  color: "green"
+inputs:
+  target:
+    description: "MCP endpoint URL (https://…/mcp) or a listed server id (mcp-registry/io.github.you/server)"
+    required: true
+  min-grade:
+    description: "Fail below this grade: A, B, C, D or F"
+    required: false
+    default: "C"
+  fail-on-safety:
+    description: "Fail when tool-poisoning findings reach this level: review, danger or never"
+    required: false
+    default: "danger"
+  fixes-file:
+    description: "Optional path to write corrected tool definitions (JSON)"
+    required: false
+    default: ""
+outputs:
+  grade:
+    description: "Readiness grade"
+    value: ${{ steps.check.outputs.grade }}
+  score:
+    description: "Readiness score, 0-100"
+    value: ${{ steps.check.outputs.score }}
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - id: check
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        MIN_GRADE: ${{ inputs.min-grade }}
+        FAIL_ON_SAFETY: ${{ inputs.fail-on-safety }}
+        FIXES: ${{ inputs.fixes-file }}
+      run: |
+        python -m pip install --quiet --upgrade "glimind>=0.4.3"
+        args=(check "$TARGET" --min-grade "$MIN_GRADE" --fail-on-safety "$FAIL_ON_SAFETY")
+        [ -n "$FIXES" ] && args+=(--fixes "$FIXES")
+        set +e
+        glimind "${args[@]}" --json > glimind.json
+        code=$?
+        set -e
+        python - <<'PY'
+        import json, os
+        try:
+            r = json.load(open("glimind.json"))
+            rep = r.get("report", r)
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                f.write(f"grade={rep.get('grade','')}\nscore={rep.get('score','')}\n")
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                f.write(f"### Glimind: grade {rep.get('grade','?')} ({rep.get('score','?')}/100)\n\n{rep.get('summary','')}\n")
+                for i in (rep.get("issues") or [])[:10]:
+                    f.write(f"- **{i.get('severity')}** {i.get('message')} Fix: {i.get('fix')}\n")
+            print(f"Glimind grade {rep.get('grade')} ({rep.get('score')}/100): {rep.get('summary','')}")
+            for reason in r.get("failReasons") or []:
+                print("FAIL:", reason)
+        except Exception as e:
+            print("could not read result:", e)
+        PY
+        exit $code
